@@ -83,3 +83,29 @@ def mhc_pre_norm_fn_ref(
     sqrsum = residual.view(-1, 1, rms_group_size).square().sum(-1)
     mixes = (mixes * (sqrsum.unsqueeze(-1) / rms_group_size + mhc_norm_eps).rsqrt()).sum(-2)
     return mixes.view(*residual.shape[:2], -1)
+
+
+def mhc_pre_norm_fn_partials_ref(
+    residual: torch.Tensor,
+    fn: torch.Tensor,
+    n_splits: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Split-K partials of the prenorm GEMM, built from the torch reference.
+
+    That GEMM now lives in DeepGEMM, so the reduce/rmsnorm operator is driven
+    by reference GEMM outputs: one partial per split of the reduction
+    dimension, matching what the split-K GEMM used to produce.
+    """
+    mhc_mult3, mhc_hidden_size = fn.shape
+    num_tokens = residual.shape[0] * residual.shape[1]
+    split_size = mhc_hidden_size // n_splits
+
+    x_flat = residual.float().flatten(2, 3).reshape(num_tokens, mhc_hidden_size)
+    out_mul = torch.empty(n_splits, num_tokens, 1, mhc_mult3, dtype=torch.float32, device=residual.device)
+    sqrsum = torch.empty(n_splits, num_tokens, 1, dtype=torch.float32, device=residual.device)
+    for i in range(n_splits):
+        x_split = x_flat[:, i * split_size : (i + 1) * split_size].unsqueeze(1)
+        fn_split = fn[:, i * split_size : (i + 1) * split_size].unsqueeze(1)
+        out_mul[i] = torch.einsum('mbk,nbk->mbn', x_split, fn_split)
+        sqrsum[i] = x_split.square().sum(-1)
+    return out_mul, sqrsum
